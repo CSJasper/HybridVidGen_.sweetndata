@@ -1492,20 +1492,8 @@ def assemble_video(timeline: List[Dict], output_path: Path, fps=30) -> Path:
 
 
 def mux_audio(video_path: Path, audio_path: Path, output_path: Path):
-    """Combine video and audio."""
+    """Combine video and audio - exact copy from original working version."""
     print(f"[Muxing] Combining audio and video...")
-    print(f"  -> Video input: {video_path}")
-    print(f"  -> Audio input: {audio_path}")
-    print(f"  -> Output: {output_path}")
-
-    # Verify inputs exist
-    if not video_path.exists():
-        print(f"[Error] Video input not found: {video_path}")
-        return False
-    if not audio_path.exists():
-        print(f"[Error] Audio input not found: {audio_path}")
-        return False
-
     cmd = [
         "ffmpeg", "-y",
         "-i", str(video_path),
@@ -1517,18 +1505,8 @@ def mux_audio(video_path: Path, audio_path: Path, output_path: Path):
         "-shortest",
         str(output_path)
     ]
-
-    # Use same approach as original: suppress output to match original behavior
-    # Don't check return code - just run like original does
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    # Only return False if output file wasn't created (file system issue)
-    if not output_path.exists():
-        print(f"[Error] Output file was not created: {output_path}")
-        return False
-
     print(f"✓ Final video saved: {output_path}")
-    return True
 
 
 def trim_audio(input_path: Path, output_path: Path, start: float, end: Optional[float] = None):
@@ -1628,7 +1606,9 @@ def main():
                        help="Disable negative prompts")
     parser.add_argument("--min-prompt-words", type=int, default=15,
                        help="Minimum words before prompt extension is applied")
-    
+    parser.add_argument("--assemble-only", action="store_true",
+                       help="Skip generation, only assemble existing clips and mux audio")
+
     args = parser.parse_args()
 
     if not args.audio.exists():
@@ -1753,11 +1733,17 @@ def main():
 
     if args.audio_start > 0 or args.audio_end is not None:
         temp_audio = work_dir / "trimmed_audio.mp3"
-        result = trim_audio(args.audio, temp_audio, args.audio_start, args.audio_end)
-        if result is None:
-            print("[Error] Failed to trim audio. Aborting.")
-            return
-        process_audio_path = temp_audio
+
+        # Check if trimmed audio already exists (for --assemble-only mode)
+        if temp_audio.exists():
+            print(f"[Audio] Using existing trimmed audio: {temp_audio}")
+            process_audio_path = temp_audio
+        else:
+            result = trim_audio(args.audio, temp_audio, args.audio_start, args.audio_end)
+            if result is None:
+                print("[Error] Failed to trim audio. Aborting.")
+                return
+            process_audio_path = temp_audio
 
     # Verify audio file exists
     if not process_audio_path.exists():
@@ -1774,6 +1760,71 @@ def main():
 
     if not timeline:
         print("No timeline generated. Check thresholds.")
+        return
+
+    # --assemble-only mode: skip generation, use existing files
+    if args.assemble_only:
+        print("\n[Assemble-Only Mode] Skipping generation, using existing files...")
+
+        # Find existing peak clips
+        existing_peaks = sorted(work_dir.glob("peak_*.mp4"))
+        existing_peaks = [p for p in existing_peaks if "source" not in p.name]
+
+        if not existing_peaks:
+            print("[Error] No existing peak clips found in work_dir")
+            return
+
+        print(f"  -> Found {len(existing_peaks)} peak clips")
+
+        # Assign existing peaks to timeline
+        for item in timeline:
+            if item['type'] == 'peak':
+                item['file'] = random.choice(existing_peaks)
+
+        # Find existing transition clips
+        for i, item in enumerate(timeline):
+            if item['type'] == 'gap':
+                # Check for loop_combined transition (intro/outro)
+                if i == 0 or i == len(timeline) - 1:
+                    loop_clip = work_dir / "transition_loop_combined.mp4"
+                    if loop_clip.exists():
+                        item['file'] = loop_clip
+                        if i == len(timeline) - 1:  # outro
+                            item['trim_start'] = 0.0
+                            item['trim_duration'] = item['duration']
+                        else:  # intro
+                            # Calculate outro duration for trim_start
+                            outro_dur = timeline[-1]['duration'] if timeline[-1]['type'] == 'gap' else 0
+                            item['trim_start'] = outro_dur
+                            item['trim_duration'] = item['duration']
+                        continue
+
+                # Check for regular transition
+                trans_file = work_dir / f"transition_{i:04d}.mp4"
+                if trans_file.exists():
+                    item['file'] = trans_file
+                else:
+                    print(f"  [Warning] Missing transition file: {trans_file}")
+
+        # Go directly to assembly
+        temp_video = assemble_video(timeline, args.output)
+
+        if not temp_video.exists():
+            print(f"[Error] Assembly failed - temp video not found: {temp_video}")
+            return
+
+        # Mux Audio
+        mux_success = mux_audio(temp_video, process_audio_path, args.output)
+
+        if not mux_success:
+            print(f"[Warning] Muxing may have failed.")
+
+        # Cleanup temp video (keep trimmed_audio for future reuse)
+        if temp_video.exists():
+            temp_video.unlink()
+
+        print(f"\n[COMPLETE] Assemble-only finished!")
+        print(f"  Final Output: {args.output}")
         return
 
     # Generate Peak Clips
@@ -1887,13 +1938,10 @@ def main():
         # Continue anyway like original - don't return early
         # The output file should still be created even if there were warnings
 
-    # Cleanup
+    # Cleanup (keep trimmed_audio for future reuse with --assemble-only)
     if temp_video.exists():
         temp_video.unlink()
-    
-    if temp_audio and temp_audio.exists():
-        temp_audio.unlink()
-    
+
     # Save generation metadata
     metadata = {
         "arguments": {
