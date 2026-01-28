@@ -37,7 +37,7 @@
 ### 필요한 라이브러리 세팅
 
 ```bash
-conda create -n hybrid_vidgen python=3.10 -y
+conda create -n hybrid_vidgen python=3.11 -y
 conda activate hybrid_vidgen
 pip install -r requirements.txt
 ```
