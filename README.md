@@ -39,7 +39,7 @@
 ```bash
 conda create -n hybrid_vidgen python=3.11 -y
 conda activate hybrid_vidgen
-pip install -r requirements.txt
+pip install -r requirements.txt --no-deps
 ```
 
 ### 추가 설정
